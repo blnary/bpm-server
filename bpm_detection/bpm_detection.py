@@ -31,16 +31,15 @@ def gen_sin():
     return samps, fs
 
 
-def bpm_detector(data, fs, decimation, downsample):
+def bpm_detector(data, fs, decimation):
     min_ndx = math.floor(60.0 / 240 * (fs / decimation))
     max_ndx = math.floor(60.0 / 40 * (fs / decimation))
 
     # Downsample
-    if downsample:
-        remainder = len(data) % decimation
-        zeros_needed = decimation - remainder
-        data = np.pad(data, (0, zeros_needed), mode='constant')
-        data = np.mean(data.reshape(-1, decimation), axis=1)
+    remainder = len(data) % decimation
+    zeros_needed = decimation - remainder
+    data = np.pad(data, (0, zeros_needed), mode='constant')
+    data = np.mean(data.reshape(-1, decimation), axis=1)
 
     # Normalize
     data = data - np.mean(data)
@@ -89,18 +88,6 @@ if __name__ == "__main__":
         help="Downsample decimation, higher value means less processing time."
     )
     parser.add_argument(
-        "--hop_length",
-        type=int,
-        default=64,
-        help="Hop legnth for onset strength calculation."
-    )
-    parser.add_argument(
-        "--use_onset",
-        type=bool,
-        default=False,
-        help="Toggle use onset information or not."
-    )
-    parser.add_argument(
         "--use_sine",
         type=bool,
         default=False,
@@ -110,12 +97,7 @@ if __name__ == "__main__":
 
     # Preprocess
     print("Loading file...")
-    hop_length = args.hop_length if args.use_onset else 1
     samps, fs = gen_sin() if args.use_sine else librosa.load(args.filename)
-    if args.use_onset:
-        print("Calculating onset strength...")
-        samps = librosa.onset.onset_strength(
-            y=samps, sr=fs, hop_length=hop_length)
     print("Doing auto correlation...")
     data = []
     max_correl = 0
@@ -123,7 +105,7 @@ if __name__ == "__main__":
     bpm_by_max = 0
     n = 0
     nsamps = len(samps)
-    window_samps = int(args.window * fs / hop_length)
+    window_samps = int(args.window * fs)
     samps_ndx = 0
     max_window_ndx = math.floor(nsamps / window_samps)
 
@@ -136,9 +118,8 @@ if __name__ == "__main__":
             raise AssertionError(str(len(data)))
 
         # Detect bpm
-        decimation = hop_length if args.use_onset else args.decimation
         bpm, correl = bpm_detector(
-            data, fs, decimation, not args.use_onset)
+            data, fs, args.decimation)
         if bpm is None:
             continue
 
@@ -165,6 +146,6 @@ if __name__ == "__main__":
         print(f"Beats Per Minute: {bpm_by_max}")
 
     # Plot
-    plt.hlines([0.5 if args.use_onset else 0.15], 0.25, 1.5, alpha=0.5, color='r',
+    plt.hlines([0.15], 0.25, 1.5, alpha=0.5, color='r',
                linestyle='--', label='Thres')
     plt.show(block=True)
