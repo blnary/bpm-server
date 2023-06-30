@@ -1,0 +1,13 @@
+[[source]]
+url = "http://10.249.181.72:8888/mirrors_bfsu_edu_cn/pypi/web/simple"
+verify_ssl = false
+name = "pip_conf_index_global"
+
+[packages]
+librosa = "*"
+fastapi = {extras = ["all"], version = "*"}
+
+[dev-packages]
+
+[requires]
+python_version = "3.11"

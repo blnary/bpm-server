@@ -1,28 +1,32 @@
-# Copyright 2012 Free Software Foundation, Inc.
-#
-# This file is part of The BPM Detector Python
-#
-# The BPM Detector Python is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 3, or (at your option)
-# any later version.
-#
-# The BPM Detector Python is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with The BPM Detector Python; see the file COPYING.  If not, write to
-# the Free Software Foundation, Inc., 51 Franklin Street,
-# Boston, MA 02110-1301, USA.
-
-import argparse
 import librosa
 import math
-
-import matplotlib.pyplot as plt
+import time
 import numpy as np
+from fastapi import FastAPI
+
+
+class Args:
+    def __init__(self, filename, window, thres, decimation, n_fft,
+                 win_length, hop_length, use_sine, plot):
+        self.filename = filename
+        self.window = window
+        self.thres = thres
+        self.decimation = decimation
+        self.n_fft = n_fft
+        self.win_length = win_length
+        self.hop_length = hop_length
+        self.use_sine = use_sine
+        self.plot = plot
+
+
+app = FastAPI()
+
+
+@app.get("/bpm/")
+async def get_bpm(filename: str):
+    args = Args(filename, 4, 0.07, 16, 512, 512, 128, False, False)
+    bpm, offset = process_file(args)
+    return {"bpm": bpm, "offset": offset}
 
 
 def gen_sin():
@@ -37,12 +41,18 @@ def gcd_spb(spb_candidate, spb_peak):
         return -1
     min_rel_err = float('inf')
     result = -1
+
+    # Try for every simple fractions
     for i in range(1, 10):
         for j in range(1, 10):
             coef = i / j
-            rel_err = 0
             unit = spb_peak * coef
-            if 60 / unit > 240 or 60 / unit < 120:
+
+            # Prefer whole BPM
+            rel_err = abs(round(60 / unit) - 60 / unit)
+
+            # Limit BPM to 80-240
+            if 60 / unit > 240 or 60 / unit < 80:
                 continue
             last_spb = -1
             for val in spb_candidate:
@@ -57,9 +67,10 @@ def gcd_spb(spb_candidate, spb_peak):
     return result
 
 
-def bpm_detector(data, fs, decimation):
+def detect_bpm(data, fs, args):
+    decimation = args.decimation
     min_ndx = math.floor(60.0 / 240 * (fs / decimation))
-    max_ndx = math.floor(60.0 / 40 * (fs / decimation))
+    max_ndx = math.floor(60.0 / 30 * (fs / decimation))
 
     # Downsample
     remainder = len(data) % decimation
@@ -84,7 +95,7 @@ def bpm_detector(data, fs, decimation):
         np.linalg.norm(correl_midpoint_tmp)
 
     # Detect candidate
-    high_ndx = np.argwhere(correl_midpoint_tmp > 0.15)
+    high_ndx = np.argwhere(correl_midpoint_tmp > args.thres)
     high_ndx_adjusted = high_ndx + min_ndx
     spb_candidate = high_ndx_adjusted / (fs / decimation)
 
@@ -97,77 +108,42 @@ def bpm_detector(data, fs, decimation):
     # Get seconds per beat
     n = np.arange(0, len(correl_midpoint_tmp))
     n = (n + min_ndx) / (fs / decimation)
-    plt.plot(n, correl_midpoint_tmp)
+
+    # Return
     return spb_candidate, spb_peak, correl
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Process audio file to determine the Beats Per Minute.")
-    parser.add_argument("--filename", required=True,
-                        help="audio file for processing")
-    parser.add_argument(
-        "--window",
-        type=float,
-        default=3,
-        help="Size of the the window (seconds) that will be scanned to \
-                determine the bpm. Typically less than 10 seconds. [3]",
-    )
-    parser.add_argument(
-        "--decimation",
-        type=int,
-        default=16,
-        help="Downsample decimation, higher value means less processing time."
-    )
-    parser.add_argument(
-        "--use_sine",
-        type=bool,
-        default=False,
-        help="Use template sine wave as audio input."
-    )
-    args = parser.parse_args()
-
-    # Preprocess
+def process_file(args):
     print("Loading file...")
+    initial_time = time.time()
     samps, fs = gen_sin() if args.use_sine else librosa.load(args.filename)
-    print("Doing auto correlation...")
     data = []
-    local_spb_candidate = 0
+    spbc = 0
     peak_correl = 0
     peak_spb = 0
+    peak_samp_ndx = 0
     spb_candidate = np.array([], dtype=np.float64)
     bpm = 0
-    n = 0
     nsamps = len(samps)
     window_samps = int(args.window * fs)
     samps_ndx = 0
     max_window_ndx = math.floor(nsamps / window_samps)
 
-    # Iterate through all windows
+    # Iterate through all windows, collect spb candidates and peak
+    print("Doing auto correlation...")
     for window_ndx in range(0, max_window_ndx):
-
-        # Get a new set of samples
         data = samps[samps_ndx: samps_ndx + window_samps]
         if not ((len(data) % window_samps) == 0):
             raise AssertionError(str(len(data)))
-
-        # Detect bpm
-        local_spb_candidate, local_spb_peak, correl = bpm_detector(
-            data, fs, args.decimation)
-
-        # Remember candidates and peak
-        if local_spb_candidate is None:
+        spbc, spbp, correl = detect_bpm(data, fs, args)
+        if spbc is None:
             continue
-        spb_candidate = np.append(spb_candidate, local_spb_candidate)
+        spb_candidate = np.append(spb_candidate, spbc)
         if correl > peak_correl:
             peak_correl = correl
-            peak_spb = local_spb_peak
-
-        # Iterate at the end of the loop
+            peak_spb = spbp
+            peak_samp_ndx = samps_ndx
         samps_ndx = samps_ndx + window_samps
-
-        # Counter for debug...
-        n = n + 1
 
     # Calculate BPM by GCD
     spb = gcd_spb(spb_candidate, peak_spb)
@@ -175,19 +151,36 @@ if __name__ == "__main__":
     rounded_bpm = round(bpm)
     rel_err = bpm - rounded_bpm
 
-    # Check BPM validity
+    # Calculate offset by onset algorithm
+    print("Calculating offset...")
+    data = samps[peak_samp_ndx: peak_samp_ndx + window_samps]
+    onset_env = librosa.onset.onset_strength(
+        y=data,
+        sr=fs,
+        hop_length=args.hop_length,
+        n_fft=args.n_fft,
+        win_length=args.win_length
+    )
+    onset_env = np.gradient(onset_env)
+    onset_env = onset_env / np.max(onset_env)
+    onset_trim = 8
+    onset_env = onset_env[onset_trim:]
+    raw_offset_ndx = np.argmax(onset_env)
+    onset_offset = args.n_fft // (2 * args.hop_length)
+    offset_ndx = (raw_offset_ndx + onset_trim) * args.hop_length + \
+        peak_samp_ndx - onset_offset
+    offset = offset_ndx / fs
+    modded_offset = offset % spb * 1000
+
+    # Print and return the results
+    elapsed_time = time.time() - initial_time
     if bpm <= 0:
         print(f"Failed to get BPM: {rounded_bpm}")
     else:
         print("Completed!")
-        print(f"Beats Per Minute: {rounded_bpm}\nRelative Error: {rel_err}")
-
-    # Plot
-    vlines = np.arange(10) * spb
-    vlines = vlines[vlines > 0.25]
-    vlines = vlines[vlines < 1.5]
-    plt.hlines([0.15], 0.25, 1.5, alpha=0.5, color='r',
-               linestyle='--', label='Thres')
-    plt.vlines(vlines, 0.15, peak_correl, alpha=0.5, color='b',
-               linestyle='--', label='Beat')
-    plt.show(block=True)
+        print("- Beats Per Minute: %d" % rounded_bpm)
+        print("- BPM Error: %.2f" % rel_err)
+        print("- Offset: %.1fms" % modded_offset)
+        print("- Offset Error: %.1fms" % (args.hop_length / fs * 1000))
+        print("- Run Time: %.1fs" % elapsed_time)
+    return bpm, modded_offset
